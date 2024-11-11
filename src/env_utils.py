@@ -9,7 +9,7 @@ import numpy as np
 from gymnasium.spaces import Box
 
 import ogbench
-from utils.datasets import Dataset
+from jaxrl_m.dataset import Dataset
 
 
 class EpisodeMonitor(gymnasium.Wrapper):
