@@ -166,3 +166,6 @@ class TrainState(flax.struct.PyTreeNode):
             if pmap_axis is not None:
                 grads = jax.lax.pmean(grads, axis_name=pmap_axis)
             return self.apply_gradients(grads=grads)
+
+    def select(self, name):
+        return functools.partial(self, name=name)

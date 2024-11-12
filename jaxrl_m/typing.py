@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, Mapping
 import numpy as np
 import jax.numpy as jnp
 import flax

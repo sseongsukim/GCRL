@@ -12,6 +12,13 @@ This file contains nn.Module definitions for common networks used in RL. It is d
     ActorCritic: Same as WithEncoder, but for possibly many different networks (e.g. actor, critic, value)
 """
 
+"""
+Adapted from 
+1) https://github.com/dibyaghosh/jaxrl_m/blob/main/jaxrl_m/networks.py
+2) https://github.com/seohongpark/ogbench/blob/master/impls/utils/networks.py
+3) https://github.com/seohongpark/ogbench/blob/master/impls/utils/flax_utils.py
+"""
+
 from jaxrl_m.typing import *
 
 import flax.linen as nn
@@ -21,11 +28,61 @@ import distrax
 import flax.linen as nn
 import jax.numpy as jnp
 
+
+class ModuleDict(nn.Module):
+    """A dictionary of modules.
+
+    This allows sharing parameters between modules and provides a convenient way to access them.
+
+    Attributes:
+        modules: Dictionary of modules.
+    """
+
+    modules: Dict[str, nn.Module]
+
+    @nn.compact
+    def __call__(self, *args, name=None, **kwargs):
+        """Forward pass.
+
+        For initialization, call with `name=None` and provide the arguments for each module in `kwargs`.
+        Otherwise, call with `name=<module_name>` and provide the arguments for that module.
+        """
+        if name is None:
+            if kwargs.keys() != self.modules.keys():
+                raise ValueError(
+                    f"When `name` is not specified, kwargs must contain the arguments for each module. "
+                    f"Got kwargs keys {kwargs.keys()} but module keys {self.modules.keys()}"
+                )
+            out = {}
+            for key, value in kwargs.items():
+                if isinstance(value, Mapping):
+                    out[key] = self.modules[key](**value)
+                elif isinstance(value, Sequence):
+                    out[key] = self.modules[key](*value)
+                else:
+                    out[key] = self.modules[key](value)
+            return out
+
+        return self.modules[name](*args, **kwargs)
+
+
 ###############################
 #
 #  Common Networks
 #
 ###############################
+class Identity(nn.Module):
+
+    @nn.compact
+    def __call__(self, x):
+        return x
+
+
+class LengthNormalize(nn.Module):
+
+    @nn.compact
+    def __call__(self, x):
+        return x / jnp.linalg.norm(x, axis=-1, keepdims=True) * jnp.sqrt(x.shape[-1])
 
 
 def default_init(scale: Optional[float] = 1.0):
@@ -34,7 +91,7 @@ def default_init(scale: Optional[float] = 1.0):
 
 class MLP(nn.Module):
     hidden_dims: Sequence[int]
-    activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
+    activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.gelu
     activate_final: int = False
     kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_init()
 
@@ -50,6 +107,7 @@ class MLP(nn.Module):
                 x = self.activations(x)
         return x
 
+
 class LayerNormMLP(nn.Module):
     hidden_dims: Sequence[int]
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.gelu
@@ -60,10 +118,11 @@ class LayerNormMLP(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         for i, size in enumerate(self.hidden_dims):
             x = nn.Dense(size, kernel_init=self.kernel_init)(x)
-            if i + 1 < len(self.hidden_dims) or self.activate_final:                
+            if i + 1 < len(self.hidden_dims) or self.activate_final:
                 x = self.activations(x)
                 x = nn.LayerNorm()(x)
         return x
+
 
 ###############################
 #
@@ -71,6 +130,7 @@ class LayerNormMLP(nn.Module):
 #  Common RL Networks
 #
 ###############################
+
 
 class DiscreteCritic(nn.Module):
     hidden_dims: Sequence[int]
@@ -83,6 +143,7 @@ class DiscreteCritic(nn.Module):
             observations
         )
 
+
 class Critic(nn.Module):
     hidden_dims: Sequence[int]
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
@@ -92,6 +153,7 @@ class Critic(nn.Module):
         inputs = jnp.concatenate([observations, actions], -1)
         critic = MLP((*self.hidden_dims, 1), activations=self.activations)(inputs)
         return jnp.squeeze(critic, -1)
+
 
 def ensemblize(cls, num_qs, out_axes=0, **kwargs):
     """
@@ -109,8 +171,9 @@ def ensemblize(cls, num_qs, out_axes=0, **kwargs):
         in_axes=None,
         out_axes=out_axes,
         axis_size=num_qs,
-        **kwargs
+        **kwargs,
     )
+
 
 class ValueCritic(nn.Module):
     hidden_dims: Sequence[int]
@@ -120,11 +183,12 @@ class ValueCritic(nn.Module):
         critic = MLP((*self.hidden_dims, 1))(observations)
         return jnp.squeeze(critic, -1)
 
+
 class Critic(nn.Module):
     hidden_dims: tuple = (256, 256)
     use_layer_norm: bool = False
     activate_final: bool = False
-    
+
     @nn.compact
     def __call__(self, observations, actions):
         x = jnp.concatenate([observations, actions], -1)
@@ -133,18 +197,19 @@ class Critic(nn.Module):
         else:
             module = MLP
         q = module(
-            (*self.hidden_dims, 1), 
-            activate_final=self.activate_final, 
-            activations=nn.gelu
+            (*self.hidden_dims, 1),
+            activate_final=self.activate_final,
+            activations=nn.gelu,
         )(x).squeeze(-1)
         return q
+
 
 class EnsembleCritic(nn.Module):
     hidden_dims: tuple = (256, 256)
     use_layer_norm: bool = False
     activate_final: bool = False
     ensemble_size: int = 2
-    
+
     @nn.compact
     def __call__(self, observations, actions):
         x = jnp.concatenate([observations, actions], -1)
@@ -154,17 +219,18 @@ class EnsembleCritic(nn.Module):
             module = MLP
         module = ensemblize(module, self.ensemble_size)
         q1, q2 = module(
-            (*self.hidden_dims, 1), 
-            activate_final=self.activate_final, 
+            (*self.hidden_dims, 1),
+            activate_final=self.activate_final,
             activations=nn.relu,
         )(x).squeeze(-1)
         return q1, q2
+
 
 class ImplicitPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
     final_fc_init_scale: float = 1e-2
-    
+
     @nn.compact
     def __call__(
         self,
@@ -180,6 +246,7 @@ class ImplicitPolicy(nn.Module):
         actions = jnp.tanh(means)
         return actions
 
+
 class Policy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
@@ -191,7 +258,10 @@ class Policy(nn.Module):
 
     @nn.compact
     def __call__(
-        self, observations: jnp.ndarray, temperature: float = 1.0, plan: bool = False,
+        self,
+        observations: jnp.ndarray,
+        temperature: float = 1.0,
+        plan: bool = False,
     ) -> distrax.Distribution:
         outputs = MLP(
             self.hidden_dims,
@@ -221,6 +291,7 @@ class Policy(nn.Module):
             )
         return distribution
 
+
 class DiscretePolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
@@ -228,7 +299,7 @@ class DiscretePolicy(nn.Module):
 
     @nn.compact
     def __call__(
-            self, observations: jnp.ndarray, temperature: float = 1.0
+        self, observations: jnp.ndarray, temperature: float = 1.0
     ) -> distrax.Distribution:
         outputs = MLP(
             self.hidden_dims,
@@ -239,9 +310,12 @@ class DiscretePolicy(nn.Module):
             self.action_dim, kernel_init=default_init(self.final_fc_init_scale)
         )(outputs)
 
-        distribution = distrax.Categorical(logits=logits / jnp.maximum(1e-6, temperature))
+        distribution = distrax.Categorical(
+            logits=logits / jnp.maximum(1e-6, temperature)
+        )
 
         return distribution
+
 
 class TransformedWithMode(distrax.Transformed):
     def mode(self) -> jnp.ndarray:
@@ -256,6 +330,7 @@ def soft_clamp(x, _min, _max):
     x = _max - softplus(_max - x)
     x = _min + softplus(x - _min)
     return x
+
 
 class EnsembleLinear(nn.Module):
     input_dim: int
@@ -279,10 +354,11 @@ class EnsembleLinear(nn.Module):
         x = jnp.einsum("nbi,nij->nbj", x, self.weight)
         x = x + self.bias
         return x
-    
+
     def get_decay_loss(self):
-        decay_loss = self.weight_decay * (0.5*((self.weight**2).sum()))
+        decay_loss = self.weight_decay * (0.5 * ((self.weight**2).sum()))
         return decay_loss
+
 
 class EnsembleDyanmics(nn.Module):
     obs_dim: int
@@ -291,21 +367,26 @@ class EnsembleDyanmics(nn.Module):
     weight_decays: Sequence[int]
     num_ensemble: int
     pred_reward: bool
-    
+
     def setup(self):
         hidden_dims = [self.obs_dim + self.action_dim] + list(self.hidden_dims)
-        self.layers = [EnsembleLinear(
-            input_dim= input_dim,
-            output_dim= output_dim,
-            num_ensemble= self.num_ensemble,
-            weight_decay= weight_decay,
-        ) for input_dim, output_dim, weight_decay in zip(hidden_dims[:-1], hidden_dims[1:], self.weight_decays)]
+        self.layers = [
+            EnsembleLinear(
+                input_dim=input_dim,
+                output_dim=output_dim,
+                num_ensemble=self.num_ensemble,
+                weight_decay=weight_decay,
+            )
+            for input_dim, output_dim, weight_decay in zip(
+                hidden_dims[:-1], hidden_dims[1:], self.weight_decays
+            )
+        ]
         output_dim = self.obs_dim + 1 if self.pred_reward else self.obs_dim
         self.final_layers = EnsembleLinear(
-            input_dim= hidden_dims[-1],
-            output_dim= output_dim * 2,
-            num_ensemble= self.num_ensemble,
-            weight_decay= self.weight_decays[-1],
+            input_dim=hidden_dims[-1],
+            output_dim=output_dim * 2,
+            num_ensemble=self.num_ensemble,
+            weight_decay=self.weight_decays[-1],
         )
         self.min_logvar = self.param(
             "min_logvar", nn.initializers.constant(-10.0), (output_dim,)
@@ -314,35 +395,39 @@ class EnsembleDyanmics(nn.Module):
             "max_logvar", nn.initializers.constant(0.5), (output_dim,)
         )
         self.output_dim = output_dim
-    
+
     def __call__(self, obs_action: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         x = obs_action
         for layer in self.layers:
             x = layer(x)
             x = nn.swish(x)
         x = self.final_layers(x)
-        mean, logvar = x[:, :, :self.output_dim], x[:, :, self.output_dim:]
+        mean, logvar = x[:, :, : self.output_dim], x[:, :, self.output_dim :]
         logvar = soft_clamp(logvar, self.min_logvar, self.max_logvar)
-        return mean, logvar 
-    
+        return mean, logvar
+
     def get_max_logvar_sum(self):
         return self.max_logvar.sum()
-    
+
     def get_min_logvar_sum(self):
         return self.min_logvar.sum()
-    
+
     def get_total_decay_loss(self):
         decay_loss = 0
         for layer in self.layers:
             decay_loss += layer.get_decay_loss()
         decay_loss += self.final_layers.get_decay_loss()
         return decay_loss
+
+
 ###############################
 #
 #
 #   Meta Networks for Encoders
 #
 ###############################
+
+
 def get_latent(
     encoder: nn.Module, observations: Union[jnp.ndarray, Dict[str, jnp.ndarray]]
 ):
@@ -419,3 +504,172 @@ class ActorCritic(nn.Module):
         if "value" in self.networks:
             rets["value"] = self.value(observations)
         return rets
+
+
+###############################
+#
+#
+#   Goal-conditioned Networks
+#
+###############################
+
+
+class GCEncoder(nn.Module):
+    state_encoder: nn.Module = None
+    concat_encoder: nn.Module = None
+
+    @nn.compact
+    def __call__(self, observations, goals=None, goal_encoded=False):
+        reps = []
+        if self.state_encoder is not None:
+            reps.append(self.state_encoder(observations))
+
+        if goals is not None:
+            if goal_encoded:
+                reps.append(goals)
+            else:
+                if self.concat_encoder is not None:
+                    x = jnp.concatenate([observations, goals], axis=-1)
+                    reps.append(self.concat_encoder(x))
+        reps = jnp.concatenate(reps, axis=-1)
+        return reps
+
+
+class GCEnsembleValue(nn.Module):
+    hidden_dims: Sequence[int]
+    use_layer_norm: bool
+    gc_encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        module = ensemblize(module, 2)
+        self.value_layer = module(
+            hidden_dims=(*self.hidden_dims, 1),
+            activate_final=False,
+        )
+
+    def __call__(self, observations, goals=None, actions=None):
+        if self.gc_encoder is not None:
+            inputs = [self.gc_encoder(observations, goals)]
+        else:
+            inputs = [observations]
+            if goals is not None:
+                inputs.append(goals)
+        if actions is not None:
+            inputs.append(actions)
+        inputs = jnp.concatenate(inputs, axis=-1)
+
+        v1, v2 = self.value_layer(inputs).squeeze(-1)
+        return v1, v2
+
+
+class GCDiscreteActor(nn.Module):
+    hidden_dims: Sequence[int]
+    action_dim: int
+    use_layer_norm: bool
+    final_fc_init_scale: float = 1e-2
+    gc_encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        self.actor_layer = module(
+            hidden_dims=self.hidden_dims,
+            activate_final=True,
+        )
+        self.logit_layer = nn.Dense(
+            self.action_dim, kernel_init=default_init(self.final_fc_init_scale)
+        )
+
+    def __call__(self, observations, goals=None, goal_encoded=False, temperature=1.0):
+        if self.gc_encoder is not None:
+            inputs = self.gc_encoder(
+                observations,
+                goals,
+                goal_encoded,
+            )
+        else:
+            inputs = [observations]
+            if goals is not None:
+                inputs.append(goals)
+            inputs = jnp.concatenate(inputs, -1)
+        outputs = self.actor_layer(inputs)
+        logits = self.logit_layer(outputs) / jnp.maximum(1e-6, temperature)
+        dist = distrax.Categorical(
+            logits=logits,
+        )
+        return dist
+
+
+class GCContinuousActor(nn.Module):
+    hidden_dims: Sequence[int]
+    use_layer_norm: bool
+    action_dim: int
+    log_std_min: Optional[float] = -5.0
+    log_std_max: Optional[float] = 2.0
+    tanh_squash_distribution: bool = False
+    state_dependent_std: bool = False
+    constant_std: bool = True
+    final_fc_init_scale: float = 1e-2
+    gc_encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        self.actor_layer = module(
+            hidden_dims=self.hidden_dims,
+            activate_final=True,
+        )
+        self.mean_layer = nn.Dense(
+            self.action_dim,
+            kernel_init=default_init(self.final_fc_init_scale),
+        )
+        if self.state_dependent_std:
+            self.log_std_layer = nn.Dense(
+                self.action_dim,
+                kernel_init=default_init(self.final_fc_init_scale),
+            )
+        else:
+            if not self.constant_std:
+                self.log_stds = self.param(
+                    "log_stds",
+                    nn.initializers.zeros,
+                    (self.action_dim,),
+                )
+
+    def __call__(
+        self,
+        observations,
+        goals=None,
+        goal_encoded=False,
+        temperature=1.0,
+    ):
+        if self.gc_encoder is not None:
+            inputs = self.gc_encoder(
+                observations,
+                goals,
+                goal_encoded,
+            )
+        else:
+            inputs = [observations]
+            if goals is not None:
+                inputs.append(goals)
+            inputs = jnp.concatenate(inputs, axis=-1)
+        outputs = self.actor_layer(inputs)
+
+        means = self.mean_layer(outputs)
+        if self.state_dependent_std:
+            log_stds = self.log_std_layer(outputs)
+        else:
+            if self.constant_std:
+                log_stds = jnp.zeros_like(means)
+            else:
+                log_stds = self.log_stds
+
+        log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
+        dist = distrax.MultivariateNormalDiag(
+            loc=means, scale_diag=jnp.exp(log_stds) * temperature
+        )
+        if self.tanh_squash_distribution:
+            dist = TransformedWithMode(
+                distribution=dist, bijector=distrax.Block(distrax.Tanh(), ndims=-1)
+            )
+        return dist

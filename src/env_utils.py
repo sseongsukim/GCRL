@@ -1,4 +1,4 @@
-
+# Adapted from https://github.com/seohongpark/ogbench/blob/master/impls/utils/env_utils.py
 import collections
 import os
 import platform
