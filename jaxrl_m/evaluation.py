@@ -6,6 +6,8 @@ from functools import partial
 from collections import defaultdict
 import time
 import jax.numpy as jnp
+from tqdm import tqdm
+
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
     """
@@ -47,18 +49,81 @@ def add_to(dict_of_lists, single_dict):
 
 def kitchen_render(kitchen_env, wh=64):
     from dm_control.mujoco import engine
+
     camera = engine.MovableCamera(kitchen_env.sim, wh, wh)
-    camera.set_pose(distance=1.8, lookat=[-0.3, .5, 2.], azimuth=90, elevation=-60)
+    camera.set_pose(distance=1.8, lookat=[-0.3, 0.5, 2.0], azimuth=90, elevation=-60)
     img = camera.render()
     return img
 
 
-def evaluate(
-    policy_fn, 
-    env: gym.Env, 
-    num_episodes: int, 
-    num_videos: int
+def multi_tasks_evaluate(
+    policy_fn: callable,
+    env: gym.Env,
+    task_id: int,
+    num_episodes: int,
+    num_videos: int,
+    video_frame_skip: int = 3,
+    eval_temperature: float = 0.0,
+    eval_gaussian: float = 0.0,
+    discrete: bool = False,
 ):
+    trajectories = []
+    states = defaultdict(list)
+    videos = []
+    for i in tqdm(range(num_episodes + num_videos)):
+        traj = defaultdict(list)
+        should_render = i >= num_episodes
+
+        observation, info = env.reset(
+            options=dict(
+                task_id=task_id,
+                render_goal=should_render,
+            )
+        )
+        goal = info.get("goal")
+        goal_frame = info.get("goal_rendered")
+        done, step, render = False, 0, []
+        while not done:
+            action = policy_fn(
+                observations=observation,
+                goals=goal,
+                temperature=eval_temperature,
+            )
+            action = np.array(action)
+            if not discrete and eval_gaussian is not None:
+                action = np.random.normal(action, eval_gaussian)
+
+            next_observation, reward, terminated, truncated, info = env.step(action)
+            done = np.logical_or(terminated, truncated)
+            step += 1
+            if should_render and (step % video_frame_skip == 0 or done):
+                frame = env.render().copy()
+                if goal_frame is not None:
+                    render.append(np.concatenate([goal_frame, frame], axis=0))
+                else:
+                    render.append(frame)
+
+            transition = dict(
+                observation=observation,
+                next_observation=next_observation,
+                action=action,
+                reward=reward,
+                done=done,
+                info=info,
+            )
+            add_to(traj, transition)
+            observation = next_observation
+        if num_episodes > i:
+            add_to(states, flatten(info))
+            trajectories.append(traj)
+        else:
+            videos.append(np.array(render))
+    for k, v in states.items():
+        states[k] = np.mean(v)
+    return states, trajectories, videos
+
+
+def evaluate(policy_fn, env: gym.Env, num_episodes: int, num_videos: int):
     """
     Evaluates a policy in an environment by running it for some number of episodes,
     and returns average statistics for metrics in the environment's info dict.
@@ -86,7 +151,11 @@ def evaluate(
             observation, _, done, info = env.step(action)
             if i >= num_episodes:
                 size = 208
-                img = env.render("rgb_array", width= size, height= size).transpose(2, 0, 1).copy()
+                img = (
+                    env.render("rgb_array", width=size, height=size)
+                    .transpose(2, 0, 1)
+                    .copy()
+                )
                 frames.append(img)
             add_to(stats, flatten(info))
             step += 1

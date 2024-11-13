@@ -1,3 +1,6 @@
-from agent import hiql
+from agent import hiql, qrl
 
-algos = {"hiql": hiql.create_learner}
+algos = {
+    "hiql": hiql.create_learner,
+    "qrl": qrl.create_learner,
+}

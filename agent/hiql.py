@@ -14,7 +14,6 @@ import jax
 import jax.numpy as jnp
 import ml_collections
 import optax
-from flax.jax_utils import replicate, unreplicate
 
 
 def expectile_loss(adv, diff, expectile):
@@ -27,145 +26,151 @@ class HIQLAgent(flax.struct.PyTreeNode):
     network: TrainState
     config: dict = flax.struct.field(pytree_node=False)
 
+    def compute_value_loss(self, batch, network_params):
+        next_tv1, next_tv2 = self.network.select("target_value")(
+            batch["next_observations"],
+            batch["value_goals"],
+        )
+        next_tv = jnp.minimum(next_tv1, next_tv2)
+        q = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv
+
+        tv1, tv2 = self.network.select("target_value")(
+            batch["observations"],
+            batch["value_goals"],
+        )
+        tv = (tv1 + tv2) / 2
+
+        advantage = q - tv
+
+        q1 = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv1
+        q2 = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv2
+        v1, v2 = self.network.select("value")(
+            batch["observations"],
+            batch["value_goals"],
+            params=network_params,
+        )
+        v = (v1 + v2) / 2
+
+        value_loss1 = expectile_loss(
+            advantage, q1 - v1, self.config["expectile"]
+        ).mean()
+        value_loss2 = expectile_loss(
+            advantage, q2 - v2, self.config["expectile"]
+        ).mean()
+        value_loss = value_loss1 + value_loss2
+
+        value_info = {
+            "value/value_loss": value_loss,
+            "value/v_mean": v.mean(),
+            "value/advantage_mean": advantage.mean(),
+            "value/q": q.mean(),
+            "value/target_v_mean": tv.mean(),
+            "value/next_target_v_mean": ((next_tv1 + next_tv2) / 2).mean(),
+        }
+
+        return value_loss, value_info
+
+    def compute_actor_loss(self, batch, network_params):
+        v1, v2 = self.network.select("value")(
+            batch["observations"],
+            batch["low_actor_goals"],
+        )
+        v = (v1 + v2) / 2
+        nv1, nv2 = self.network.select("value")(
+            batch["next_observations"],
+            batch["low_actor_goals"],
+        )
+        nv = (nv1 + nv2) / 2
+
+        advantage = nv - v
+        exp_a = jnp.minimum(jnp.exp(advantage * self.config["low_alpha"]), 100.0)
+
+        goal_reps = self.network.select("goal_rep")(
+            jnp.concatenate(
+                [batch["observations"], batch["low_actor_goals"]],
+                axis=-1,
+            ),
+            params=network_params,
+        )
+        if not self.config["low_actor_rep_grad"]:
+            goal_reps = jax.lax.stop_gradient(goal_reps)
+
+        dist = self.network.select("low_actor")(
+            batch["observations"],
+            goal_reps,
+            goal_encoded=True,
+            params=network_params,
+        )
+        log_prob = dist.log_prob(batch["actions"])
+
+        actor_loss = -(exp_a * log_prob).mean()
+
+        actor_info = {
+            "actor/actor_loss": actor_loss,
+            "actor/advantage_mean": advantage.mean(),
+            "actor/log_prob_mean": log_prob.mean(),
+        }
+        if not self.config["discrete"]:
+            actor_info.update(
+                {
+                    "actor/mse": jnp.mean((dist.mode() - batch["actions"]) ** 2),
+                    "actor/std": jnp.mean(dist.scale_diag),
+                }
+            )
+        return actor_loss, actor_info
+
+    def compute_high_loss(self, batch, network_params):
+        v1, v2 = self.network.select("value")(
+            batch["observations"],
+            batch["high_actor_goals"],
+        )
+        v = (v1 + v2) / 2
+        nv1, nv2 = self.network.select("value")(
+            batch["high_actor_targets"],
+            batch["high_actor_goals"],
+        )
+        nv = (nv1 + nv2) / 2
+
+        advantage = nv - v
+        exp_a = jnp.minimum(jnp.exp(advantage * self.config["high_alpha"]), 100.0)
+
+        dist = self.network.select("high_actor")(
+            batch["observations"],
+            batch["high_actor_goals"],
+            params=network_params,
+        )
+        target = self.network.select("goal_rep")(
+            jnp.concatenate(
+                [batch["observations"], batch["high_actor_targets"]],
+                axis=-1,
+            )
+        )
+        log_prob = dist.log_prob(target)
+        high_loss = -(exp_a * log_prob).mean()
+
+        high_info = {
+            "high_actor/high_loss": high_loss,
+            "high_actor/advantage_mean": advantage.mean(),
+            "high_actor/log_prob_mean": log_prob.mean(),
+            "high_actor/mse_loss": jnp.mean((dist.mode() - target) ** 2),
+            "high_actor/std": jnp.mean(dist.scale_diag),
+        }
+        return high_loss, high_info
+
+    @jax.jit
+    def total_loss(self, batch, network_params):
+        value_loss, value_info = self.compute_value_loss(batch, network_params)
+        actor_loss, actor_info = self.compute_actor_loss(batch, network_params)
+        high_loss, high_info = self.compute_high_loss(batch, network_params)
+        loss = value_loss + actor_loss + high_loss
+        return loss, {**value_info, **actor_info, **high_info}
+
     @partial(jax.jit, static_argnames="pmap_axis")
     def update(self, batch, pmap_axis: str = None):
-        def compute_value_loss(network_params):
-            next_tv1, next_tv2 = self.network.select("target_value")(
-                batch["next_observations"],
-                batch["value_goals"],
-            )
-            next_tv = jnp.minimum(next_tv1, next_tv2)
-            q = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv
-
-            tv1, tv2 = self.network.select("target_value")(
-                batch["observations"],
-                batch["value_goals"],
-            )
-            tv = (tv1 + tv2) / 2
-
-            advantage = q - tv
-
-            q1 = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv1
-            q2 = batch["rewards"] + self.config["discount"] * batch["masks"] * next_tv2
-            v1, v2 = self.network.select("value")(
-                batch["observations"],
-                batch["value_goals"],
-                params=network_params,
-            )
-            v = (v1 + v2) / 2
-
-            value_loss1 = expectile_loss(
-                advantage, q1 - v1, self.config["expectile"]
-            ).mean()
-            value_loss2 = expectile_loss(
-                advantage, q2 - v2, self.config["expectile"]
-            ).mean()
-            value_loss = value_loss1 + value_loss2
-
-            value_info = {
-                "value/value_loss": value_loss,
-                "value/v_mean": v.mean(),
-                "value/advantage_mean": advantage.mean(),
-                "value/q": q.mean(),
-                "value/target_v_mean": tv.mean(),
-                "value/next_target_v_mean": ((next_tv1 + next_tv2) / 2).mean(),
-            }
-
-            return value_loss, value_info
-
-        def compute_actor_loss(network_params):
-            v1, v2 = self.network.select("value")(
-                batch["observations"],
-                batch["low_actor_goals"],
-            )
-            v = (v1 + v2) / 2
-            nv1, nv2 = self.network.select("value")(
-                batch["next_observations"],
-                batch["low_actor_goals"],
-            )
-            nv = (nv1 + nv2) / 2
-
-            advantage = nv - v
-            exp_a = jnp.minimum(jnp.exp(advantage * self.config["low_alpha"]), 100.0)
-
-            goal_reps = self.network.select("goal_rep")(
-                jnp.concatenate(
-                    [batch["observations"], batch["low_actor_goals"]],
-                    axis=-1,
-                ),
-                params=network_params,
-            )
-            if not self.config["low_actor_rep_grad"]:
-                goal_reps = jax.lax.stop_gradient(goal_reps)
-
-            dist = self.network.select("low_actor")(
-                batch["observations"],
-                goal_reps,
-                goal_encoded=True,
-                params=network_params,
-            )
-            log_prob = dist.log_prob(batch["actions"])
-
-            actor_loss = -(exp_a * log_prob).mean()
-
-            actor_info = {
-                "actor/actor_loss": actor_loss,
-                "actor/advantage_mean": advantage.mean(),
-                "actor/log_prob_mean": log_prob.mean(),
-            }
-            if not self.config["discrete"]:
-                actor_info.update(
-                    {
-                        "actor/mse": jnp.mean((dist.mode() - batch["actions"]) ** 2),
-                        "actor/std": jnp.mean(dist.scale_diag),
-                    }
-                )
-            return actor_loss, actor_info
-
-        def compute_high_loss(network_params):
-            v1, v2 = self.network.select("value")(
-                batch["observations"],
-                batch["high_actor_goals"],
-            )
-            v = (v1 + v2) / 2
-            nv1, nv2 = self.network.select("value")(
-                batch["high_actor_targets"],
-                batch["high_actor_goals"],
-            )
-            nv = (nv1 + nv2) / 2
-
-            advantage = nv - v
-            exp_a = jnp.minimum(jnp.exp(advantage * self.config["high_alpha"]), 100.0)
-
-            dist = self.network.select("high_actor")(
-                batch["observations"],
-                batch["high_actor_goals"],
-                params=network_params,
-            )
-            target = self.network.select("goal_rep")(
-                jnp.concatenate(
-                    [batch["observations"], batch["high_actor_targets"]],
-                    axis=-1,
-                )
-            )
-            log_prob = dist.log_prob(target)
-            high_loss = -(exp_a * log_prob).mean()
-
-            high_info = {
-                "high_actor/high_loss": high_loss,
-                "high_actor/advantage_mean": advantage.mean(),
-                "high_actor/log_prob_mean": log_prob.mean(),
-                "high_actor/mse_loss": jnp.mean((dist.mode() - target) ** 2),
-                "high_actor/std": jnp.mean(dist.scale_diag),
-            }
-            return high_loss, high_info
+        new_rng, rng = jax.random.split(self.rng, 2)
 
         def loss_fn(network_params):
-            value_loss, value_info = compute_value_loss(network_params)
-            actor_loss, actor_info = compute_actor_loss(network_params)
-            high_loss, high_info = compute_high_loss(network_params)
-            loss = value_loss + actor_loss + high_loss
-            return loss, {**value_info, **actor_info, **high_info}
+            return self.total_loss(batch, network_params)
 
         new_network, update_info = self.network.apply_loss_fn(
             loss_fn=loss_fn,
@@ -180,7 +185,36 @@ class HIQLAgent(flax.struct.PyTreeNode):
         )
         new_network.params["modules_target_value"] = new_target_params
 
-        return self.replace(network=new_network), update_info
+        return self.replace(network=new_network, rng=new_rng), update_info
+
+    @jax.jit
+    def sample_actions(
+        self,
+        observations: np.ndarray,
+        goals: np.ndarray = None,
+        seed: PRNGKey = None,
+        temperature: float = 1.0,
+    ):
+        rng, high_key, low_key = jax.random.split(seed, 3)
+        high_dist = self.network.select("high_actor")(
+            observations,
+            goals,
+            temperature=temperature,
+        )
+        goal_reps = high_dist.sample(seed=high_key)
+        goal_reps = (
+            goal_reps
+            / jnp.linalg.norm(goal_reps, axis=-1, keepdims=True)
+            * jnp.sqrt(goal_reps.shape[-1])
+        )
+
+        low_dist = self.network.select("low_actor")(
+            observations, goal_reps, goal_encoded=True, temperature=temperature
+        )
+        actions = low_dist.sample(seed=low_key)
+        if not self.config["discrete"]:
+            actions = jnp.clip(actions, -1.0, 1.0)
+        return actions
 
 
 def create_learner(
@@ -188,7 +222,6 @@ def create_learner(
     observations: jnp.ndarray,
     actions: jnp.ndarray,
     config: Dict,
-    multi_gpu: bool,
 ):
 
     rng = jax.random.PRNGKey(seed)
@@ -314,7 +347,6 @@ def create_learner(
     params = network.params
     params["modules_target_value"] = params["modules_value"]
 
-    config.update(dict(multi_gpu=multi_gpu))
     return HIQLAgent(rng=rngs, network=network, config=flax.core.FrozenDict(**config))
 
 

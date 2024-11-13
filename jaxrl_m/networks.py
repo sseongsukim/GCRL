@@ -25,6 +25,7 @@ import flax.linen as nn
 import jax.numpy as jnp
 
 import distrax
+import jax
 import flax.linen as nn
 import jax.numpy as jnp
 
@@ -673,3 +674,120 @@ class GCContinuousActor(nn.Module):
                 distribution=dist, bijector=distrax.Block(distrax.Tanh(), ndims=-1)
             )
         return dist
+
+
+###############################
+#
+#
+#   QUasimetic Networks
+#
+###############################
+
+
+class GCMRNValue(nn.Module):
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    use_layer_norm: bool
+    encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        self.phi = module(
+            hidden_dims=(*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+        )
+
+    def __call__(self, observations, goals, is_phi=False, info=False):
+        if is_phi:
+            phi_s, phi_g = observations, goals
+        else:
+            if self.encoder is not None:
+                observations = self.encoder(observations)
+                goals = self.encoder(goals)
+            phi_s = self.phi(observations)
+            phi_g = self.phi(goals)
+
+        sym_s = phi_s[..., : self.latent_dim // 2]
+        sym_g = phi_g[..., : self.latent_dim // 2]
+
+        asym_s = phi_s[..., self.latent_dim // 2 :]
+        asym_g = phi_g[..., self.latent_dim // 2 :]
+
+        squared_dist = ((sym_s - sym_g) ** 2).sum(axis=-1)
+        quasi = nn.relu((asym_s - asym_g).max(axis=-1))
+
+        v = jnp.sqrt(jnp.maximum(squared_dist, 1e-12)) + quasi
+
+        if info:
+            return v, phi_s, phi_g
+        else:
+            return v
+
+
+class Param(nn.Module):
+    init_value: float = 0.0
+
+    @nn.compact
+    def __call__(self):
+        return self.param("value", init_fn=lambda key: jnp.full((), self.init_value))
+
+
+class LogParam(nn.Module):
+    init_value: float = 1.0
+
+    @nn.compact
+    def __call__(self):
+        log_value = self.param(
+            "log_value", init_fn=lambda key: jnp.full((), jnp.log(self.init_value))
+        )
+        return jnp.exp(log_value)
+
+
+class GCIQEValue(nn.Module):
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    dim_per_component: int
+    use_layer_norm: bool
+    encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        self.phi = module(
+            hidden_dims=(*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+        )
+        self.alpha = Param()
+
+    def __call__(self, observations, goals, is_phi=False, info=False):
+        alpha = jax.nn.sigmoid(self.alpha())
+        if is_phi:
+            phi_s, phi_g = observations, goals
+        else:
+            if self.encoder is not None:
+                observations = self.encoder(observations)
+                goals = self.encoder(goals)
+            phi_s = self.phi(observations)
+            phi_g = self.phi(goals)
+        x = jnp.reshape(phi_s, (*phi_s.shape[:-1], -1, self.dim_per_component))
+        y = jnp.reshape(phi_g, (*phi_g.shape[:-1], -1, self.dim_per_component))
+        valid = x < y
+        xy = jnp.concatenate(jnp.broadcast_arrays(x, y), axis=-1)
+        ixy = xy.argsort(axis=-1)
+        sxy = jnp.take_along_axis(xy, ixy, axis=-1)
+        neg_inc_copies = jnp.take_along_axis(
+            valid,
+            ixy % self.dim_per_component,
+            axis=-1,
+        ) * jnp.where(ixy < self.dim_per_component, -1, 1)
+        neg_inp_copies = jnp.cumsum(neg_inc_copies, axis=-1)
+        neg_f = -1.0 * (neg_inp_copies < 0)
+        neg_incf = jnp.concatenate(
+            [neg_f[..., :1], neg_f[..., 1:] - neg_f[..., :-1]],
+            axis=-1,
+        )
+        components = (sxy * neg_incf).sum(axis=-1)
+        v = alpha * components.mean(axis=-1) + (1 - alpha) * components.max(axis=-1)
+        if info:
+            return v, phi_s, phi_g
+        else:
+            return v

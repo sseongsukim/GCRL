@@ -24,16 +24,18 @@ We recommend the following workflow (see examples/mujoco/d4rl_iql.py for a more 
 With the following setup, you may set wandb configurations from the command line, e.g.
     python main.py --wandb.project=my_project --wandb.group=my_group --wandb.offline
 """
+
 import wandb
 
 import tempfile
 import absl.flags as flags
 import ml_collections
-from  ml_collections.config_dict import FieldReference
+from ml_collections.config_dict import FieldReference
 import datetime
 import wandb
 import time
 import numpy as np
+from PIL import Image, ImageEnhance
 
 
 def get_flag_dict():
@@ -47,15 +49,21 @@ def get_flag_dict():
 def default_wandb_config():
     config = ml_collections.ConfigDict()
     config.project = "jaxrl_m"  # WandB Project Name
-    config.entity = FieldReference(None, field_type=str)  # Which entity to log as (default: your own user)
+    config.entity = FieldReference(
+        None, field_type=str
+    )  # Which entity to log as (default: your own user)
 
     group_name = FieldReference(None, field_type=str)  # Group name
-    config.exp_prefix = group_name  # Group name (deprecated, but kept for backwards compatibility)
+    config.exp_prefix = (
+        group_name  # Group name (deprecated, but kept for backwards compatibility)
+    )
     config.group = group_name  # Group name
 
-    experiment_name = FieldReference(None, field_type=str) # Experiment name
+    experiment_name = FieldReference(None, field_type=str)  # Experiment name
     config.name = experiment_name  # Run name (will be formatted with flags / variant)
-    config.exp_descriptor = experiment_name  # Run name (deprecated, but kept for backwards compatibility)
+    config.exp_descriptor = (
+        experiment_name  # Run name (deprecated, but kept for backwards compatibility)
+    )
 
     config.unique_identifier = ""  # Unique identifier for run (will be automatically generated unless provided)
     config.random_delay = 0  # Random delay for wandb.init (in seconds)
@@ -142,3 +150,63 @@ def setup_wandb(
     )
     wandb.config.update(wandb_config)
     return run
+
+
+def reshape_video(v, n_cols=None):
+    """Helper function to reshape videos."""
+    if v.ndim == 4:
+        v = v[None,]
+
+    _, t, h, w, c = v.shape
+
+    if n_cols is None:
+        # Set n_cols to the square root of the number of videos.
+        n_cols = np.ceil(np.sqrt(v.shape[0])).astype(int)
+    if v.shape[0] % n_cols != 0:
+        len_addition = n_cols - v.shape[0] % n_cols
+        v = np.concatenate((v, np.zeros(shape=(len_addition, t, h, w, c))), axis=0)
+    n_rows = v.shape[0] // n_cols
+
+    v = np.reshape(v, newshape=(n_rows, n_cols, t, h, w, c))
+    v = np.transpose(v, axes=(2, 5, 0, 3, 1, 4))
+    v = np.reshape(v, newshape=(t, c, n_rows * h, n_cols * w))
+
+    return v
+
+
+def get_wandb_video(renders=None, n_cols=None, fps=30):
+    """Return a Weights & Biases video.
+
+    It takes a list of videos and reshapes them into a single video with the specified number of columns.
+
+    Args:
+        renders: List of videos. Each video should be a numpy array of shape (t, h, w, c).
+        n_cols: Number of columns for the reshaped video. If None, it is set to the square root of the number of videos.
+    """
+    # Pad videos to the same length.
+    max_length = max([len(render) for render in renders])
+    for i, render in enumerate(renders):
+        assert render.dtype == np.uint8
+
+        # Decrease brightness of the padded frames.
+        final_frame = render[-1]
+        final_image = Image.fromarray(final_frame)
+        enhancer = ImageEnhance.Brightness(final_image)
+        final_image = enhancer.enhance(0.5)
+        final_frame = np.array(final_image)
+
+        pad = np.repeat(final_frame[np.newaxis, ...], max_length - len(render), axis=0)
+        renders[i] = np.concatenate([render, pad], axis=0)
+
+        # Add borders.
+        renders[i] = np.pad(
+            renders[i],
+            ((0, 0), (1, 1), (1, 1), (0, 0)),
+            mode="constant",
+            constant_values=0,
+        )
+    renders = np.array(renders)  # (n, t, h, w, c)
+
+    renders = reshape_video(renders, n_cols)  # (t, c, nr * h, nc * w)
+
+    return wandb.Video(renders, fps=fps, format="mp4")
