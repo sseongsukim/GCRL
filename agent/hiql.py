@@ -165,8 +165,8 @@ class HIQLAgent(flax.struct.PyTreeNode):
         loss = value_loss + actor_loss + high_loss
         return loss, {**value_info, **actor_info, **high_info}
 
-    @partial(jax.jit, static_argnames="pmap_axis")
-    def update(self, batch, pmap_axis: str = None):
+    @jax.jit
+    def update(self, batch):
         new_rng, rng = jax.random.split(self.rng, 2)
 
         def loss_fn(network_params):
@@ -175,7 +175,6 @@ class HIQLAgent(flax.struct.PyTreeNode):
         new_network, update_info = self.network.apply_loss_fn(
             loss_fn=loss_fn,
             has_aux=True,
-            pmap_axis=pmap_axis,
         )
 
         new_target_params = jax.tree.map(

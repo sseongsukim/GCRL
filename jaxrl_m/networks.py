@@ -679,7 +679,7 @@ class GCContinuousActor(nn.Module):
 ###############################
 #
 #
-#   QUasimetic Networks
+#   Quasimetic Networks
 #
 ###############################
 
@@ -791,3 +791,64 @@ class GCIQEValue(nn.Module):
             return v, phi_s, phi_g
         else:
             return v
+
+
+###############################
+#
+#
+#   Contrastive RL Networks
+#
+###############################
+
+
+class GCBilinearValue(nn.Module):
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    use_layer_norm: bool
+    ensemble: bool = True
+    value_exp: bool = False
+    state_encoder: nn.Module = None
+    goal_encoder: nn.Module = None
+
+    def setup(self):
+        module = LayerNormMLP if self.use_layer_norm else MLP
+        if self.ensemble:
+            module = ensemblize(module, 2)
+        self.phi = module(
+            hidden_dims=(*self.hidden_dims, self.latent_dim),
+        )
+        self.psi = module(
+            hidden_dims=(*self.hidden_dims, self.latent_dim),
+        )
+
+    def __call__(self, observations, goals, actions=None, info=False):
+        if self.state_encoder is not None:
+            observations = self.state_encoder(observations)
+        if self.goal_encoder is not None:
+            goals = self.goal_encoder(goals)
+
+        if actions is None:
+            phi_inputs = observations
+        else:
+            phi_inputs = jnp.concatenate(
+                [observations, actions],
+                axis=-1,
+            )
+        phi = self.phi(phi_inputs)
+        psi = self.psi(goals)
+        v = (phi * psi / jnp.sqrt(self.latent_dim)).sum(axis=-1)
+
+        if self.value_exp:
+            v = jnp.exp(v)
+        if info:
+            return v, phi, psi
+        else:
+            return v
+
+
+class GCDiscreteBilinearCritic(GCBilinearValue):
+    action_dim: int = None
+
+    def __call__(self, observations, goals, actions=None, info=False):
+        actions = jnp.eye(self.action_dim)[actions]
+        return super().__call__(observations, goals, actions, info)

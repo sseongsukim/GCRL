@@ -22,10 +22,9 @@ import wandb
 import pickle
 import numpy as np
 import random
-import flax
 import jax
 import jax.numpy as jnp
-from flax.jax_utils import pad_shard_unpad, replicate, unreplicate
+
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("env_name", "antmaze-large-navigate-v0", "Environment name.")
@@ -48,7 +47,7 @@ flags.DEFINE_integer("video_frame_skip", 3, "")
 
 seed = np.random.randint(low=0, high=10000000)
 flags.DEFINE_integer("seed", seed, "")
-config_flags.DEFINE_config_file("agent", "agent/qrl.py", lock_config=False)
+config_flags.DEFINE_config_file("agent", "agent/crl.py", lock_config=False)
 
 
 def prepare_batch(batch, num_devices, multi_gpu):
@@ -63,14 +62,6 @@ def prepare_batch(batch, num_devices, multi_gpu):
 
 
 def main(_):
-    devices = jax.local_devices()
-    sharding = jax.sharding.PositionalSharding(devices)
-    prepare_fn = partial(
-        prepare_batch, num_devices=len(devices), multi_gpu=FLAGS.multi_gpu
-    )
-
-    tf.config.set_visible_devices([], "GPU")
-
     random.seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
     # Wandb & Log
@@ -125,12 +116,17 @@ def main(_):
         actions=example_batch["actions"],
         config=config,
     )
-
+    devices = jax.local_devices()
+    sharding = jax.sharding.PositionalSharding(devices)
+    prepare_fn = partial(
+        prepare_batch, num_devices=len(devices), multi_gpu=FLAGS.multi_gpu
+    )
+    tf.config.set_visible_devices([], "GPU")
     if FLAGS.multi_gpu:
         FLAGS.batch_size *= len(devices)
         agent = jax.device_put(jax.tree.map(jnp.array, agent), sharding.replicate())
 
-    for step in tqdm(range(FLAGS.total_steps + 1), smoothing=0.1, desc="train"):
+    for step in tqdm(range(1, FLAGS.total_steps + 1), smoothing=0.1, desc="train"):
         batch = prepare_fn(train_dataset.sample(FLAGS.batch_size))
         agent, update_info = agent.update(batch)
 
