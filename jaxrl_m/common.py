@@ -1,9 +1,12 @@
+import flax.serialization
 from jaxrl_m.typing import *
 import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax import tree_util
+import os
+import pickle
 import optax
 import functools
 
@@ -169,3 +172,13 @@ class TrainState(flax.struct.PyTreeNode):
 
     def select(self, name):
         return functools.partial(self, name=name)
+
+
+def save_agent(agent, save_dir, epoch):
+    save_dict = dict(
+        agent=flax.serialization.to_state_dict(agent),
+    )
+    save_path = os.path.join(save_dir, f"params_{epoch}.pkl")
+    with open(save_path, "wb") as f:
+        pickle.dump(save_dict, f, protocol=4)
+    print(f"save to {save_path}")

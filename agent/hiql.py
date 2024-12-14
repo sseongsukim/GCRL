@@ -234,12 +234,14 @@ def create_learner(
         goal_rep_seq = [encoder_module()]
 
     module = LayerNormMLP if config["value_layer_norm"] else MLP
+
     goal_rep_seq.append(
         module(
             hidden_dims=(*config["value_hidden_dims"], config["rep_dim"]),
             activate_final=False,
         )
     )
+
     goal_rep_seq.append(LengthNormalize())
     goal_rep_def = nn.Sequential(goal_rep_seq)
 
@@ -276,12 +278,12 @@ def create_learner(
 
     # Value network
     value_def = GCEnsembleValue(
-        hidden_dims=config["value_hidden_dims"],
+        hidden_dims=(),
         use_layer_norm=config["value_layer_norm"],
         gc_encoder=value_encoder_def,
     )
     target_def = GCEnsembleValue(
-        hidden_dims=config["value_hidden_dims"],
+        hidden_dims=(),
         use_layer_norm=config["value_layer_norm"],
         gc_encoder=target_value_encoder_def,
     )
@@ -349,6 +351,47 @@ def create_learner(
     return HIQLAgent(rng=rngs, network=network, config=flax.core.FrozenDict(**config))
 
 
+# def get_config():
+#     config = ml_collections.ConfigDict(
+#         dict(
+#             # Agent hyperparameters.
+#             algo_name="hiql",  # Agent name.
+#             lr=3e-4,  # Learning rate.
+#             actor_hidden_dims=(512, 512, 512),  # Actor network hidden dimensions.
+#             value_hidden_dims=(512, 512, 512),  # Value network hidden dimensions.
+#             value_layer_norm=True,  # Whether to use layer normalization.
+#             actor_layer_norm=False,
+#             discount=0.99,  # Discount factor.
+#             tau=0.005,  # Target network update rate.
+#             expectile=0.7,  # IQL expectile.
+#             low_alpha=3.0,  # Low-level AWR temperature.
+#             high_alpha=3.0,  # High-level AWR temperature.
+#             subgoal_steps=25,  # Subgoal steps.
+#             rep_dim=10,  # Goal representation dimension.
+#             low_actor_rep_grad=False,  # Whether low-actor gradients flow to goal representation (use True for pixels).
+#             const_std=True,  # Whether to use constant standard deviation for the actors.
+#             discrete=False,  # Whether the action space is discrete.
+#             encoder=None,  # Visual encoder name (None, 'impala_small', etc.).
+#             # Dataset hyperparameters.
+#             dataset_class="HGCDataset",  # Dataset class name.
+#             value_p_curgoal=0.2,  # Probability of using the current state as the value goal.
+#             value_p_trajgoal=0.5,  # Probability of using a future state in the same trajectory as the value goal.
+#             value_p_randomgoal=0.3,  # Probability of using a random state as the value goal.
+#             value_geom_sample=True,  # Whether to use geometric sampling for future value goals.
+#             actor_p_curgoal=0.0,  # Probability of using the current state as the actor goal.
+#             actor_p_trajgoal=1.0,  # Probability of using a future state in the same trajectory as the actor goal.
+#             actor_p_randomgoal=0.0,  # Probability of using a random state as the actor goal.
+#             actor_geom_sample=False,  # Whether to use geometric sampling for future actor goals.
+#             gc_negative=True,  # Whether to use '0 if s == g else -1' (True) or '1 if s == g else 0' (False) as reward.
+#             p_aug=0.0,  # Probability of applying image augmentation.
+#             frame_stack=ml_collections.config_dict.placeholder(
+#                 int
+#             ),  # Number of frames to stack.
+#         )
+#     )
+#     return config
+
+
 def get_config():
     config = ml_collections.ConfigDict(
         dict(
@@ -364,14 +407,12 @@ def get_config():
             expectile=0.7,  # IQL expectile.
             low_alpha=3.0,  # Low-level AWR temperature.
             high_alpha=3.0,  # High-level AWR temperature.
-            subgoal_steps=25,  # Subgoal steps.
+            subgoal_steps=10,  # Subgoal steps.
             rep_dim=10,  # Goal representation dimension.
-            low_actor_rep_grad=False,  # Whether low-actor gradients flow to goal representation (use True for pixels).
+            low_actor_rep_grad=True,  # Whether low-actor gradients flow to goal representation (use True for pixels).
             const_std=True,  # Whether to use constant standard deviation for the actors.
             discrete=False,  # Whether the action space is discrete.
-            encoder=ml_collections.config_dict.placeholder(
-                str
-            ),  # Visual encoder name (None, 'impala_small', etc.).
+            encoder="impala_small",  # Visual encoder name (None, 'impala_small', etc.).
             # Dataset hyperparameters.
             dataset_class="HGCDataset",  # Dataset class name.
             value_p_curgoal=0.2,  # Probability of using the current state as the value goal.
@@ -383,7 +424,7 @@ def get_config():
             actor_p_randomgoal=0.0,  # Probability of using a random state as the actor goal.
             actor_geom_sample=False,  # Whether to use geometric sampling for future actor goals.
             gc_negative=True,  # Whether to use '0 if s == g else -1' (True) or '1 if s == g else 0' (False) as reward.
-            p_aug=0.0,  # Probability of applying image augmentation.
+            p_aug=0.5,  # Probability of applying image augmentation.
             frame_stack=ml_collections.config_dict.placeholder(
                 int
             ),  # Number of frames to stack.

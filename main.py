@@ -10,6 +10,7 @@ from jaxrl_m.wandb import (
     get_flag_dict,
     get_wandb_video,
 )
+from jaxrl_m.common import save_agent
 from jaxrl_m.dataset import GCDataset, HGCDataset
 from agent import algos
 from src import env_utils
@@ -27,7 +28,7 @@ import jax.numpy as jnp
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("env_name", "antmaze-large-navigate-v0", "Environment name.")
+flags.DEFINE_string("env_name", "visual-cube-single-noisy-v0", "Environment name.")
 flags.DEFINE_string("save_dir", None, "Logging dir (if not None, save params).")
 flags.DEFINE_string("run_group", "DEBUG", "")
 flags.DEFINE_integer("num_episodes", 50, "")
@@ -35,10 +36,10 @@ flags.DEFINE_integer("num_videos", 2, "")
 flags.DEFINE_integer("log_steps", 1000, "")
 flags.DEFINE_integer("eval_steps", 100000, "")
 flags.DEFINE_integer("save_steps", 250000, "")
-flags.DEFINE_integer("total_steps", 1000000, "")
-flags.DEFINE_integer("wandb_offline", 0, "")
+flags.DEFINE_integer("total_steps", 500000, "")
+flags.DEFINE_integer("wandb_offline", 1, "")
 flags.DEFINE_integer("multi_gpu", 0, "")
-flags.DEFINE_integer("batch_size", 512, "")
+flags.DEFINE_integer("batch_size", 256, "")
 
 flags.DEFINE_integer("eval_tasks", None, "")
 flags.DEFINE_float("eval_temperature", 0.0, "")
@@ -47,7 +48,7 @@ flags.DEFINE_integer("video_frame_skip", 3, "")
 
 seed = np.random.randint(low=0, high=10000000)
 flags.DEFINE_integer("seed", seed, "")
-config_flags.DEFINE_config_file("agent", "agent/crl.py", lock_config=False)
+config_flags.DEFINE_config_file("agent", "agent/hiql.py", lock_config=False)
 
 
 def prepare_batch(batch, num_devices, multi_gpu):
@@ -74,10 +75,10 @@ def main(_):
         }
     )
     config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
-
+    flag_dict = get_flag_dict()
+    setup_wandb({**flag_dict}, offline=FLAGS.wandb_offline, **FLAGS.wandb)
     start_time = int(datetime.now().timestamp())
     FLAGS.wandb["name"] += f"_{start_time}"
-    flag_dict = get_flag_dict()
     if FLAGS.save_dir is not None:
         FLAGS.save_dir = os.path.join(
             FLAGS.save_dir,
@@ -89,8 +90,6 @@ def main(_):
         print(f"Saving config to {FLAGS.save_dir}/config.pkl")
         with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
             pickle.dump(flag_dict, f)
-
-    setup_wandb({**flag_dict}, offline=FLAGS.wandb_offline, **FLAGS.wandb)
     # Env & Dataset
     config = FLAGS.agent
     env, train_dataset, val_dataset = env_utils.make_env_and_datasets(
@@ -192,6 +191,9 @@ def main(_):
                 update_info[f"val/{k}"] = v
 
             wandb.log(update_info)
+
+        if step % FLAGS.save_steps == 0:
+            save_agent(agent, FLAGS.save_dir, epoch=step)
 
 
 if __name__ == "__main__":
